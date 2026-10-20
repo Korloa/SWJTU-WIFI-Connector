@@ -82,6 +82,7 @@ internal sealed class KeeperContext : ApplicationContext
 
     private readonly NotifyIcon tray;
     private readonly ToolStripMenuItem enabledItem;
+    private readonly ToolStripMenuItem startupItem;
     private readonly ToolStripMenuItem statusItem;
     private readonly System.Windows.Forms.Timer timer;
     private KeeperSettings settings = SettingsStore.Load();
@@ -103,11 +104,21 @@ internal sealed class KeeperContext : ApplicationContext
         statusItem = new ToolStripMenuItem(status) { Enabled = false };
         enabledItem = new ToolStripMenuItem("自动连接与保活") { Checked = settings.Enabled, CheckOnClick = false };
         enabledItem.Click += (_, _) => SetEnabled(!settings.Enabled);
+        startupItem = new ToolStripMenuItem("开机自动启动") { Checked = Startup.IsEnabled(), CheckOnClick = false };
+        startupItem.Click += (_, _) =>
+        {
+            try { SetStartWithWindows(!startupItem.Checked); }
+            catch (Exception error)
+            {
+                MessageBox.Show($"修改开机启动失败：{error.Message}", "SWJTU 保活", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        };
 
         var menu = new ContextMenuStrip();
         menu.Items.Add(statusItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(enabledItem);
+        menu.Items.Add(startupItem);
         menu.Items.Add("立即检查", null, async (_, _) => await CheckAsync());
         menu.Items.Add("设置与状态", null, (_, _) => ShowSettings());
         menu.Items.Add(new ToolStripSeparator());
@@ -159,15 +170,22 @@ internal sealed class KeeperContext : ApplicationContext
 
     public void UpdateSettings(string wifiName, int intervalSeconds, bool startWithWindows)
     {
+        SetStartWithWindows(startWithWindows);
         settings.WifiName = wifiName.Trim();
         settings.IntervalSeconds = intervalSeconds;
-        Startup.SetEnabled(startWithWindows);
         SaveSettings();
         if (settings.Enabled)
         {
             timer.Interval = 1000;
             timer.Start();
         }
+    }
+
+    private void SetStartWithWindows(bool enabled)
+    {
+        Startup.SetEnabled(enabled);
+        startupItem.Checked = Startup.IsEnabled();
+        settingsForm?.SyncStartWithWindows(startupItem.Checked);
     }
 
     private void SaveSettings()

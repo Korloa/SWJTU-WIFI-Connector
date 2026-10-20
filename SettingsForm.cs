@@ -64,6 +64,8 @@ internal sealed class SettingsForm : Form
         statusLabel.Text = $"状态：{keeper.Status}";
     }
 
+    public void SyncStartWithWindows(bool enabled) => startupBox.Checked = enabled;
+
     private void Save()
     {
         if (string.IsNullOrWhiteSpace(wifiNameBox.Text))
