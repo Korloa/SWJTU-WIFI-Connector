@@ -70,6 +70,8 @@ internal static class SettingsStore
 internal sealed class KeeperContext : ApplicationContext
 {
     private static readonly Uri Portal = new("http://192.168.189.136/");
+    private static readonly Uri ConnectivityProbe = new("http://www.msftconnecttest.com/connecttest.txt");
+    private static readonly Uri FallbackProbe = new("https://www.baidu.com/");
     private static readonly HttpClient Http = new(new HttpClientHandler
     {
         AllowAutoRedirect = true,
@@ -90,8 +92,8 @@ internal sealed class KeeperContext : ApplicationContext
     private CancellationTokenSource? checkCancellation;
     private bool checking;
     private bool stopping;
-    private bool authNotified;
-    private int authFailureCount;
+    private bool connectionWarningShown;
+    private int unverifiedCount;
     private string status = "正在启动";
     private Color iconColor = Color.DarkOrange;
 
@@ -161,8 +163,8 @@ internal sealed class KeeperContext : ApplicationContext
         {
             timer.Stop();
             checkCancellation?.Cancel();
-            authFailureCount = 0;
-            authNotified = false;
+            unverifiedCount = 0;
+            connectionWarningShown = false;
             SetStatus("已暂停", Color.Gray);
         }
         settingsForm?.RefreshState();
@@ -241,33 +243,46 @@ internal sealed class KeeperContext : ApplicationContext
             }
 
             SetStatus("正在访问认证页", Color.DarkOrange);
-            using var request = new HttpRequestMessage(HttpMethod.Get, Portal);
-            request.Headers.CacheControl = new CacheControlHeaderValue { NoCache = true };
-            using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellation.Token);
-            var finalUri = response.RequestMessage?.RequestUri;
-            if (response.IsSuccessStatusCode && finalUri?.AbsolutePath.Contains("/eportal/success.jsp", StringComparison.OrdinalIgnoreCase) == true)
+            var portalConfirmed = false;
+            var portalResult = "请求失败";
+            try
             {
-                authNotified = false;
-                authFailureCount = 0;
+                using var request = new HttpRequestMessage(HttpMethod.Get, Portal);
+                request.Headers.CacheControl = new CacheControlHeaderValue { NoCache = true };
+                using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellation.Token);
+                var finalUri = response.RequestMessage?.RequestUri;
+                portalConfirmed = response.IsSuccessStatusCode &&
+                    finalUri?.AbsolutePath.Contains("/eportal/success.jsp", StringComparison.OrdinalIgnoreCase) == true;
+                portalResult = $"{(int)response.StatusCode} {finalUri?.AbsolutePath}";
+            }
+            catch (HttpRequestException error) { portalResult = error.Message; }
+            catch (OperationCanceledException) when (!cancellation.IsCancellationRequested) { portalResult = "请求超时"; }
+
+            if (portalConfirmed || await HasInternetAccessAsync(cancellation.Token))
+            {
+                if (!portalConfirmed)
+                    SettingsStore.Log($"认证页 {portalResult}，外网可用");
+                connectionWarningShown = false;
+                unverifiedCount = 0;
                 SetStatus($"{wifiName} 已连接 · {DateTime.Now:HH:mm:ss}", Color.ForestGreen);
                 nextInterval = settings.IntervalSeconds * 1000;
             }
             else
             {
-                authFailureCount++;
-                SettingsStore.Log($"认证页返回 {(int)response.StatusCode} {finalUri?.AbsolutePath}");
-                if (authFailureCount == 1)
+                unverifiedCount++;
+                SettingsStore.Log($"认证页 {portalResult}，外网探测失败");
+                if (unverifiedCount == 1)
                 {
-                    SetStatus("认证未恢复，正在重试", Color.DarkOrange);
+                    SetStatus("联网状态未确认，正在重试", Color.DarkOrange);
                     nextInterval = 5000;
                 }
                 else
                 {
-                    SetStatus("需要网页认证", Color.Firebrick);
-                    if (!authNotified)
+                    SetStatus("无法确认联网，请检查网络", Color.Firebrick);
+                    if (!connectionWarningShown)
                     {
-                        authNotified = true;
-                        tray.ShowBalloonTip(4000, "SWJTU 需要网页认证", "请自行访问校园网认证地址完成登录。", ToolTipIcon.Warning);
+                        connectionWarningShown = true;
+                        tray.ShowBalloonTip(4000, "SWJTU 联网检查失败", "外网探测未通过，请检查网络或校园网认证。", ToolTipIcon.Warning);
                     }
                 }
             }
@@ -287,6 +302,29 @@ internal sealed class KeeperContext : ApplicationContext
                 timer.Start();
             }
         }
+    }
+
+    private static async Task<bool> HasInternetAccessAsync(CancellationToken cancellation)
+    {
+        try
+        {
+            using var response = await Http.GetAsync(ConnectivityProbe, cancellation);
+            if (response.IsSuccessStatusCode &&
+                string.Equals(response.RequestMessage?.RequestUri?.Host, ConnectivityProbe.Host, StringComparison.OrdinalIgnoreCase) &&
+                (await response.Content.ReadAsStringAsync(cancellation)).Trim() == "Microsoft Connect Test")
+                return true;
+        }
+        catch (HttpRequestException) { }
+        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested) { }
+
+        try
+        {
+            using var response = await Http.GetAsync(FallbackProbe, HttpCompletionOption.ResponseHeadersRead, cancellation);
+            return response.IsSuccessStatusCode &&
+                string.Equals(response.RequestMessage?.RequestUri?.Host, FallbackProbe.Host, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (HttpRequestException) { return false; }
+        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested) { return false; }
     }
 
     private void SetStatus(string message, Color color)
